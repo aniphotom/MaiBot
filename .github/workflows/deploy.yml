@@ -3,6 +3,10 @@ name: Manual Deploy
 on:
   workflow_dispatch:
 
+concurrency:                    # ← 新增：防止两次运行同时跑（端口冲突的常见来源）
+  group: deploy-maibot
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -27,9 +31,17 @@ jobs:
           ssh "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
           scp docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.yml"
 
-      - name: 拉取镜像并启动
+      - name: 停掉旧容器                     # ← 新增
         run: |
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose pull && docker compose up -d --remove-orphans"
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose down --remove-orphans" || true
+
+      - name: 拉取最新镜像
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose pull"
+
+      - name: 启动
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose up -d --remove-orphans"
 
       - name: 健康检查
         run: |
