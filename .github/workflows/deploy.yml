@@ -1,24 +1,45 @@
 name: Manual Deploy
 
 on:
-  workflow_dispatch: # 仅允许手动触发
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.SERVER_HOST }}
+      DEPLOY_USER: ${{ secrets.SERVER_USER }}
+      DEPLOY_DIR: project/maibot
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          script: |
-            cd /path/to/your/project
-            git pull
-            # 如果有其他服务重启命令，加在这里
-            # systemctl restart your-service
+      - name: 配置 SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: 同步 docker-compose.yml 到服务器
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
+          scp docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.yml"
+
+      - name: 拉取镜像并启动
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose pull && docker compose up -d --remove-orphans"
+
+      - name: 健康检查
+        run: |
+          for i in $(seq 1 60); do
+            if ssh "$DEPLOY_USER@$DEPLOY_HOST" "curl -fsS -o /dev/null http://127.0.0.1:18001"; then
+              echo "✅ MaiBot WebUI 已就绪（${i}s）"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "❌ 未就绪，最近 50 行日志："
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose logs --tail 50 core"
+          exit 1
