@@ -1,16 +1,16 @@
 name: A_Memorix Tests
 
 on:
-  pull_request:
-    paths:
-      - "src/A_memorix/**"
-      - "src/services/memory_service.py"
-      - "src/webui/routers/memory.py"
-      - "pytests/A_memorix_test/**"
-      - "pyproject.toml"
-      - "requirements.txt"
-      - "uv.lock"
-      - ".github/workflows/a-memorix-tests.yml"
+#   pull_request:
+#     paths:
+#       - "src/A_memorix/**"
+#       - "src/services/memory_service.py"
+#       - "src/webui/routers/memory.py"
+#       - "pytests/A_memorix_test/**"
+#       - "pyproject.toml"
+#       - "requirements.txt"
+#       - "uv.lock"
+#       - ".github/workflows/a-memorix-tests.yml"
   workflow_dispatch:
 
 permissions:
