@@ -2,6 +2,7 @@ from datetime import datetime
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any, Dict, List
+import base64
 
 from PIL import Image
 
@@ -60,7 +61,8 @@ SUPPLIED_PLACEHOLDERS = GROUP_PLACEHOLDERS | PRIVATE_PLACEHOLDERS
 
 
 @pytest.fixture(autouse=True)
-def reset_prompt_cache() -> Any:
+def reset_prompt_cache(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr(global_config.experimental.attention_drift, "enabled", False)
     set_locale("zh-CN")
     clear_prompt_cache()
     yield
@@ -298,6 +300,56 @@ def test_retro_visual_descriptions_follow_actual_media_quota(
     assert message.raw_message.components[2].content == "NEW_DESCRIPTION"
 
 
+@pytest.mark.parametrize("max_images", [1, 2, 3, 4, 5])
+def test_retro_resizes_latest_three_images_across_messages(
+    max_images: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = build_retro_generator(is_group_session=True)
+    isolate_retro_blocks(generator, monkeypatch)
+    monkeypatch.setattr(global_config.visual, "max_image_num", max_images)
+    output = BytesIO()
+    Image.new("RGB", (1600, 800), "red").save(output, format="PNG")
+    original_bytes = output.getvalue()
+    # 最后一条发言含两张图，不能把“最新三张”误算成“最新三条发言”。
+    components = [
+        ImageComponent(binary_hash=f"image-{index}", binary_data=original_bytes, content=f"DESCRIPTION_{index}")
+        for index in range(5)
+    ]
+    history = [
+        build_original_history([component], message_id=f"message-{index}")
+        for index, component in enumerate(components[:3])
+    ]
+    history.append(build_original_history(components[3:], message_id="message-3"))
+    items = generator._build_retro_request_messages(
+        chat_history=history, reply_message=None, reply_reason="回答", enable_visual_message=True,
+    )
+    images = [part for part in items[1].parts if isinstance(part, ContextImagePart)]
+    assert len(images) == max_images
+    for index, part in enumerate(images):
+        expected_side = 128 if index < max_images - 3 else 640
+        with Image.open(BytesIO(base64.b64decode(part.image_base64))) as image:
+            assert image.size == (expected_side, expected_side // 2)
+    text = read_item_text(items[1])
+    for index, component in enumerate(components):
+        assert component.binary_data == original_bytes
+        assert component.content == f"DESCRIPTION_{index}"
+        assert (component.content in text) == (index < 5 - max_images)
+
+
+@pytest.mark.parametrize("size,expected_size", [((400, 1200), (213, 640)), ((1, 1200), (1, 640))])
+def test_retro_resize_keeps_transparency_and_portrait_ratio(
+    size: Any, expected_size: Any,
+) -> None:
+    output = BytesIO()
+    Image.new("RGBA", size, (255, 0, 0, 0)).save(output, format="PNG")
+    part = ContextImagePart("png", base64.b64encode(output.getvalue()).decode("ascii"))
+    resized = retro_prompt._resize_retro_image(part, 640)
+    assert resized.image_format == "png"
+    with Image.open(BytesIO(base64.b64decode(resized.image_base64))) as image:
+        assert image.size == expected_size
+        assert image.getpixel((0, 0))[3] == 0
+
+
 def read_item_text(item: Any) -> str:
     return "".join(part.text for part in item.parts if isinstance(part, ContextTextPart))
 
@@ -307,6 +359,25 @@ def isolate_retro_blocks(generator: BaseMaisakaReplyGenerator, monkeypatch: pyte
 
     monkeypatch.setattr(generator, "_build_group_chat_attention_block", lambda session_id: "")
     monkeypatch.setattr(generator, "_build_keyword_reaction_prompt", lambda **kwargs: "")
+
+
+@pytest.mark.parametrize(
+    ("locale", "heading"),
+    [("zh-CN", "注意力漂移风格："), ("en-US", "Attention drift style:"), ("ja-JP", "注意ドリフトスタイル：")],
+)
+def test_retro_replyer_attention_drift_follows_live_config(
+    monkeypatch: pytest.MonkeyPatch, locale: str, heading: str
+) -> None:
+    set_locale(locale)
+    generator = build_retro_generator(is_group_session=True)
+    isolate_retro_blocks(generator, monkeypatch)
+
+    for enabled in (False, True, False):
+        monkeypatch.setattr(global_config.experimental.attention_drift, "enabled", enabled)
+        items = generator._build_retro_request_messages(
+            chat_history=[], reply_message=None, reply_reason="测试回复原因"
+        )
+        assert read_item_text(items[0]).count(heading) == int(enabled)
 
 
 def test_retro_request_messages_fill_single_template(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -12,6 +12,7 @@ import re
 import time
 import uuid
 
+from src.common.paths import get_instance_root
 from src.common.logger import get_logger
 from src.common.operation_timing import log_operation, timed_operation
 from src.config.model_configs import APIProvider, ModelInfo
@@ -49,7 +50,7 @@ from src.llm_models.payload_content.context_item import (
 from src.llm_models.payload_content.resp_format import RespFormat, RespFormatType
 from src.llm_models.payload_content.tool_option import ToolCall, ToolOption, normalize_tool_options
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = get_instance_root()
 LLM_REQUEST_LOG_DIR = PROJECT_ROOT / "logs" / "maisaka_prompt" / "llm_error"
 LLM_REQUEST_AUDIO_DIR = PROJECT_ROOT / "data" / "prompt_audio"
 REPLAY_SCRIPT_RELATIVE_PATH = Path("scripts") / "replay_llm_request.py"
@@ -614,6 +615,7 @@ def serialize_model_info_snapshot(model_info: ModelInfo) -> dict[str, Any]:
         "force_stream_mode": model_info.force_stream_mode,
         "max_tokens": model_info.max_tokens,
         "model_identifier": model_info.model_identifier,
+        "model_type": model_info.model_type,
         "name": model_info.name,
         "send_temperature": model_info.send_temperature,
         "temperature": model_info.temperature,
@@ -632,6 +634,7 @@ def deserialize_model_info_snapshot(raw_model_info: Any) -> ModelInfo:
         force_stream_mode=bool(raw_model_info.get("force_stream_mode", False)),
         max_tokens=raw_model_info.get("max_tokens"),
         model_identifier=str(raw_model_info.get("model_identifier") or ""),
+        model_type=raw_model_info["model_type"],
         name=str(raw_model_info.get("name") or ""),
         send_temperature=bool(raw_model_info.get("send_temperature", True)),
         temperature=raw_model_info.get("temperature"),

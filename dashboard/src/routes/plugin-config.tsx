@@ -65,7 +65,10 @@ import {
   X,
 } from 'lucide-react'
 import { RestartProvider, useRestart } from '@/lib/restart-context'
+import { cn } from '@/lib/utils'
 import { RestartOverlay } from '@/components/restart-overlay'
+import { MOBILE_GLASS_CLASS } from '@/components/layout/mobile-glass'
+import { MobileHeaderActions } from '@/components/layout/MobileHeaderActions'
 import { getLocalPluginChangelog, getLocalPluginReadme, getPluginRuntimeComponents } from '@/lib/plugin-api'
 import { MarkdownRenderer } from '@/components/markdown-renderer'
 import { PluginStats } from '@/components/plugin-stats'
@@ -1226,14 +1229,14 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
     <div className="space-y-4 sm:space-y-6">
       {/* 头部 */}
       <div
-        className="sticky top-0 z-40 -mx-5 flex items-center justify-between gap-3 overflow-x-auto border-b px-5 py-2.5 shadow-sm backdrop-blur sm:-mx-7 sm:px-7 lg:-mx-8 lg:px-8"
+        className="sticky top-0 z-40 -mx-5 flex flex-col items-stretch justify-between gap-3 border-b px-5 py-2.5 shadow-sm backdrop-blur sm:-mx-7 sm:px-7 lg:-mx-8 lg:flex-row lg:items-center lg:px-8"
         style={{ backgroundColor: 'hsl(var(--background) / 0.96)' }}
       >
         <div className="flex min-w-0 items-center gap-2">
           <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={handleBack}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 lg:flex-nowrap">
             <h1 className="min-w-0 truncate text-lg font-semibold sm:text-xl" data-plugin-config-title>
               {pluginName}
             </h1>
@@ -1245,7 +1248,7 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
             </span>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2 whitespace-nowrap sm:gap-3">
+        <div className="grid min-w-0 auto-cols-fr grid-flow-col items-center gap-1 whitespace-nowrap max-lg:[&>*]:min-w-0 max-lg:[&>button]:!px-1 max-lg:[&>button]:!text-xs max-lg:[&>button>svg]:hidden lg:flex lg:shrink-0 lg:gap-3">
           {pluginPageTab !== 'details' && (
             <Button
               variant="outline"
@@ -1254,7 +1257,8 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
               onClick={() => setDocumentPanelOpen(true)}
             >
               <BookOpen className="mr-2 h-4 w-4" />
-              打开文档
+              <span className="lg:hidden">文档</span>
+              <span className="hidden lg:inline">打开文档</span>
             </Button>
           )}
           {pluginPageTab === 'settings' && (
@@ -1280,7 +1284,7 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
           )}
           <div
             data-dashboard-input="true"
-            className="border-input flex h-8 items-center gap-2 rounded-md border bg-transparent px-2 text-sm font-medium shadow-sm"
+            className="border-input flex h-8 items-center justify-center gap-1 rounded-md border bg-transparent px-1 text-sm font-medium shadow-sm lg:gap-2 lg:px-2"
           >
             <Switch
               checked={isEnabled}
@@ -1612,7 +1616,11 @@ function PluginConfigPageContent() {
   if (selectedPlugin) {
     return (
       <>
-        <ScrollArea className="h-full">
+        <ScrollArea
+          className="h-full max-lg:h-auto max-lg:overflow-visible max-lg:[&>[data-dashboard-scrollbar]]:hidden"
+          viewportClassName="max-lg:h-auto max-lg:!overflow-visible max-lg:overscroll-auto"
+          scrollbars="vertical"
+        >
           <div className="px-5 pt-0 pb-4 sm:px-7 sm:pb-6 lg:px-8">
             <PluginConfigEditor
               plugin={selectedPlugin}
@@ -1628,7 +1636,24 @@ function PluginConfigPageContent() {
 
   return (
     <>
-      <ScrollArea className="h-full">
+      {/* 手机页头右上角：去插件市场 */}
+      {!adapterManagement && (
+        <MobileHeaderActions>
+          <a
+            href={getPluginMarketplaceRoutePath()}
+            data-mobile-header-text-button="true"
+            className={cn('flex h-11 items-center rounded-full px-4 text-[15px]', MOBILE_GLASS_CLASS)}
+          >
+            插件市场
+          </a>
+        </MobileHeaderActions>
+      )}
+      {/* 手机端让列表自然撑高，由工作区统一滚动，避免内部视口拦截手势。 */}
+      <ScrollArea
+        className="h-full max-lg:h-auto max-lg:overflow-visible max-lg:[&>[data-dashboard-scrollbar]]:hidden"
+        viewportClassName="max-lg:h-auto max-lg:!overflow-visible max-lg:overscroll-auto"
+        scrollbars="vertical"
+      >
       <div className="space-y-4 p-4 sm:space-y-6 sm:p-6">
         {!adapterManagement && (
         <div className="flex flex-nowrap items-center gap-2 sm:gap-3">

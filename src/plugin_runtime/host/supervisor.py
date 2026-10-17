@@ -9,6 +9,7 @@ import os
 import sys
 import time
 
+from src.common.paths import get_instance_root
 from src.common.logger import get_logger
 from src.common.shutdown import is_shutdown_requested
 from src.config.config import global_config
@@ -91,7 +92,7 @@ from .rpc_server import RPCServer
 if TYPE_CHECKING:
     from src.chat.message_receive.message import SessionMessage
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_PROJECT_ROOT = get_instance_root()
 _RUNNER_DEBUG_FILE_PATH = _PROJECT_ROOT / "logs" / "plugin_runtime_debug" / "runner_rpc_debug.jsonl"
 _ADAPTER_PLUGIN_TYPE = "adapter"
 _RUNTIME_GROUP_LOGGER_NAMES: Dict[str, str] = {
@@ -157,9 +158,15 @@ class PluginRunnerSupervisor:
         self._plugin_type_filter: str = str(plugin_type_filter or "").strip()
         self._trusted_plugin_dirs: List[Path] = trusted_plugin_dirs or []
         self._host_version: str = detect_host_application_version(_PROJECT_ROOT)
-        self._health_interval: float = health_check_interval_sec or runtime_config.health_check_interval_sec or 30.0
-        self._runner_spawn_timeout: float = runner_spawn_timeout_sec or runtime_config.runner_spawn_timeout_sec or 30.0
-        self._max_restart_attempts: int = max_restart_attempts or runtime_config.max_restart_attempts or 3
+        self._health_interval: float = (
+            runtime_config.health_check_interval_sec if health_check_interval_sec is None else health_check_interval_sec
+        )
+        self._runner_spawn_timeout: float = (
+            runtime_config.runner_spawn_timeout_sec if runner_spawn_timeout_sec is None else runner_spawn_timeout_sec
+        )
+        self._max_restart_attempts: int = (
+            runtime_config.max_restart_attempts if max_restart_attempts is None else max_restart_attempts
+        )
 
         self._transport = create_transport_server(socket_path=socket_path)
         self._authorization = AuthorizationManager()
