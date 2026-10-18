@@ -1,4 +1,5 @@
 name: Crowdin Sync
+# crowdin专门做翻译管理的平台
 
 on:
   workflow_dispatch:
