@@ -1,18 +1,19 @@
 name: Crowdin Sync
+# crowdin专门做翻译管理的平台
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 */6 * * *"
-  push:
-    branches:
-      - main
-      - r-dev
-    paths:
-      - "crowdin.yml"
-      - "locales/zh-CN/*.json"
-      - "prompts/zh-CN/**/*.prompt"
-      - "dashboard/src/i18n/locales/zh.json"
+  # schedule:
+  #   - cron: "17 */6 * * *"
+  # push:
+  #   branches:
+  #     - main
+  #     - r-dev
+  #   paths:
+  #     - "crowdin.yml"
+  #     - "locales/zh-CN/*.json"
+  #     - "prompts/zh-CN/**/*.prompt"
+  #     - "dashboard/src/i18n/locales/zh.json"
 
 permissions:
   contents: write

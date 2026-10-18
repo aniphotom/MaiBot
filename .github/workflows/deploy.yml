@@ -1,0 +1,57 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+
+concurrency:                    # ← 新增：防止两次运行同时跑（端口冲突的常见来源）
+  group: deploy-maibot
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.SERVER_HOST }}
+      DEPLOY_USER: ${{ secrets.SERVER_USER }}
+      DEPLOY_DIR: project/maibot
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: 同步 docker-compose.yml 到服务器
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
+          scp docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.yml"
+
+      - name: 停掉旧容器                     # ← 新增
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose down --remove-orphans" || true
+
+      - name: 拉取最新镜像
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose pull"
+
+      - name: 启动
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose up -d --remove-orphans"
+
+      - name: 健康检查
+        run: |
+          for i in $(seq 1 60); do
+            if ssh "$DEPLOY_USER@$DEPLOY_HOST" "curl -fsS -o /dev/null http://127.0.0.1:18001"; then
+              echo "✅ MaiBot WebUI 已就绪（${i}s）"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "❌ 未就绪，最近 50 行日志："
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose logs --tail 50 core"
+          exit 1
