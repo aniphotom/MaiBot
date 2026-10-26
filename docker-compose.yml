@@ -2,8 +2,9 @@ services:
   core:
     container_name: maim-bot-core
     stop_grace_period: 70s # Runner 最多等待 Worker 60 秒，再保留强制退出时间
-    #### prod ####
-    image: sengokucola/maibot:latest
+    #### 自建镜像（GitHub Actions 构建并推送到 Docker Hub）####
+    image: aniphotom/maibot:${MAIBOT_IMAGE_TAG:-latest}
+    # image: sengokucola/maibot:latest
     # image: infinitycat/maibot:latest
     #### dev ####
     # image: sengokucola/maibot:dev
