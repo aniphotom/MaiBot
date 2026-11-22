@@ -1,12 +1,16 @@
 """Maisaka 推理引擎测试。"""
 
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from src.chat.heart_flow.heartFC_utils import CycleDetail
 from src.common.data_models.llm_service_data_models import LLMResponseResult
+from src.common.data_models.message_component_data_model import MessageSequence, TextComponent
+from src.config.config import global_config
 from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvocation
 from src.llm_models.model_client.base_client import GenerationAttempt, GenerationTrace
 from src.llm_models.payload_content.context_item import (
@@ -16,6 +20,7 @@ from src.llm_models.payload_content.context_item import (
 from src.llm_models.payload_content.native_tool import NativeToolCallSummary
 from src.llm_models.payload_content.tool_option import ToolCall
 from src.maisaka.chat_loop_service import ChatResponse, MaisakaChatLoopService
+from src.maisaka.context.messages import ReferenceMessageType, SessionBackedMessage
 from src.maisaka.context.usage import (
     SECTION_INSTANT_NOTICE,
     SECTION_MESSAGES,
@@ -23,13 +28,19 @@ from src.maisaka.context.usage import (
     ContextSectionUsage,
 )
 from src.maisaka.display.prompt_cli_renderer import PromptCLIVisualizer
+from src.maisaka.focus import focus_mode_manager
 from src.maisaka.mode_policy import is_idle_cycle_reason
 from src.maisaka.monitor.events import (
     _serialize_planner_block,
     _serialize_request_block,
     _serialize_tool_results,
 )
-from src.maisaka.reasoning_engine import STOP_AFTER_EXECUTION_PAUSE_REASON, MaisakaReasoningEngine
+from src.maisaka.reasoning_engine import (
+    PLANNER_UNSENT_REPLY_HINT,
+    STOP_AFTER_EXECUTION_PAUSE_REASON,
+    CycleRuntimeState,
+    MaisakaReasoningEngine,
+)
 
 
 class _ToolRegistryStub:
@@ -62,10 +73,12 @@ def _build_tool_engine(results: list[ToolExecutionResult]) -> tuple[MaisakaReaso
             platform="test",
         ),
         is_action_tool_currently_available=lambda tool_name: True,
+        expand_message_id_aliases=lambda arguments: arguments,
         _update_stage_status=lambda *args, **kwargs: None,
         _reset_consecutive_wait_count=Mock(),
         _end_planner_continuation=Mock(),
         _enter_stop_state=Mock(),
+        _monitor_run_id="synthetic-run",
         log_prefix="[test]",
     )
     engine = MaisakaReasoningEngine(runtime)
@@ -95,6 +108,8 @@ async def test_successful_stop_request_finishes_after_full_tool_batch() -> None:
         ]
     )
 
+    tool_state = CycleRuntimeState()
+    tool_state.response = _build_chat_response("测试思考", "")
     should_pause, pause_reason, _, monitor_results = await engine._handle_tool_calls(
         [
             ToolCall(call_id="call-1", func_name="terminal_tool"),
@@ -102,6 +117,8 @@ async def test_successful_stop_request_finishes_after_full_tool_batch() -> None:
             ToolCall(call_id="call-3", func_name="following_tool"),
         ],
         "测试思考",
+        CycleDetail(cycle_id=1),
+        tool_state,
     )
 
     assert should_pause is True
@@ -135,12 +152,16 @@ async def test_failed_stop_request_keeps_planner_running() -> None:
         ]
     )
 
+    tool_state = CycleRuntimeState()
+    tool_state.response = _build_chat_response("测试思考", "")
     should_pause, pause_reason, _, _ = await engine._handle_tool_calls(
         [
             ToolCall(call_id="call-1", func_name="terminal_tool"),
             ToolCall(call_id="call-2", func_name="following_tool"),
         ],
         "测试思考",
+        CycleDetail(cycle_id=1),
+        tool_state,
     )
 
     assert should_pause is False
@@ -429,3 +450,220 @@ async def test_chat_loop_keeps_reasoning_separate_from_content(monkeypatch) -> N
     assert isinstance(generation_attempts, tuple)
     assert generation_attempts[0].attempt_id == "planner-attempt-1"
     assert not hasattr(generation_attempts[0], "wire_response")
+
+
+_PRIVATE_ANALYSIS_ONLY = (
+    "本轮不需要工具调用。\n对方刚发送了私聊消息。现有上下文已经足够理解场面，没有额外资料需要查找。"
+)
+
+
+def _synthetic_user_message(text: str) -> SessionBackedMessage:
+    return SessionBackedMessage(
+        raw_message=MessageSequence([TextComponent(text)]),
+        visible_text=text,
+        timestamp=datetime(2026, 11, 22, 12, 0, 0),
+        message_id="synthetic-user",
+        source_kind="user",
+    )
+
+
+def _mock_completion(content: str, tool_calls: list[ToolCall] | None = None) -> ChatResponse:
+    """用本地构造的模型输出模拟 Planner，不访问供应商。"""
+
+    result = LLMResponseResult.from_portable_output(
+        response=content,
+        reasoning="模拟推理，不会外发",
+        tool_calls=tool_calls,
+    )
+    return ChatResponse(
+        output_items=result.output_items,
+        request_messages=[],
+        selected_history_count=1,
+        tool_count=len(tool_calls or []),
+        prompt_tokens=10,
+        built_message_count=2,
+        completion_tokens=8,
+        total_tokens=18,
+        model_name="mock-planner",
+    )
+
+
+def _build_decision_engine(
+    history: list[object],
+    *,
+    is_group: bool,
+) -> tuple[MaisakaReasoningEngine, SimpleNamespace]:
+    runtime = SimpleNamespace(
+        _chat_history=list(history),
+        session_id="synthetic-session",
+        chat_stream=SimpleNamespace(is_group_session=is_group),
+        log_prefix="[synthetic]",
+        _end_planner_continuation=Mock(),
+        _reset_consecutive_wait_count=Mock(),
+        _enter_stop_state=Mock(),
+        _monitor_run_id="synthetic-run",
+    )
+    engine = MaisakaReasoningEngine(runtime)
+    engine._emit_planner_progress = AsyncMock()  # type: ignore[method-assign]
+    engine._handle_tool_calls = AsyncMock(return_value=(False, "", [], []))  # type: ignore[method-assign]
+    return engine, runtime
+
+
+async def _decide(
+    engine: MaisakaReasoningEngine,
+    response: ChatResponse,
+    *,
+    planner_no_tool_count: int,
+) -> tuple[int, bool, CycleRuntimeState]:
+    state = CycleRuntimeState()
+    state.response = response
+    count, should_end = await engine._handle_planner_response_actions(
+        response=response,
+        cycle_detail=CycleDetail(cycle_id=planner_no_tool_count + 1),
+        state=state,
+        planner_no_tool_count=planner_no_tool_count,
+        planner_extra_lines=state.planner_extra_lines,
+    )
+    return count, should_end, state
+
+
+def _hint_count(history: list[object]) -> int:
+    return sum(
+        1
+        for message in history
+        if getattr(message, "reference_type", None) == ReferenceMessageType.PLANNER_TOOL_HINT
+    )
+
+
+@pytest.mark.asyncio
+async def test_private_analysis_omission_retries_then_invokes_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(global_config.experimental, "planner_unsent_reply_retry", False)
+    monkeypatch.setattr(focus_mode_manager, "is_enabled_for_session", lambda session_id, is_group_chat=None: False)
+    engine, runtime = _build_decision_engine(
+        [_synthetic_user_message("你好，这是一条回复测试，收到请回复一句话。")],
+        is_group=False,
+    )
+
+    count, should_end, state = await _decide(engine, _mock_completion(_PRIVATE_ANALYSIS_ONLY), planner_no_tool_count=0)
+
+    assert count == 1
+    assert should_end is False
+    assert state.cycle_end.reason == "planner_no_tool_retry"
+    engine._handle_tool_calls.assert_not_awaited()
+    runtime._enter_stop_state.assert_not_called()
+    hint = runtime._chat_history[-1]
+    assert hint.content == PLANNER_UNSENT_REPLY_HINT
+    assert _PRIVATE_ANALYSIS_ONLY not in hint.content
+    assert _hint_count(runtime._chat_history) == 1
+    assert not any(getattr(message, "source_kind", "") == "guided_reply" for message in runtime._chat_history)
+
+    reply_call = ToolCall(
+        call_id="call-reply",
+        func_name="reply",
+        args={"msg_id": "synthetic-user", "reply_reference": "回一句问候"},
+    )
+    count, should_end, state = await _decide(
+        engine,
+        _mock_completion("调用 reply 回一句问候。", [reply_call]),
+        planner_no_tool_count=count,
+    )
+
+    assert should_end is False
+    assert count == 0
+    assert state.cycle_end.reason == "tool_continue"
+    invoked_calls = engine._handle_tool_calls.await_args.args[0]
+    assert [tool_call.func_name for tool_call in invoked_calls] == ["reply"]
+    assert invoked_calls[0].args == {"msg_id": "synthetic-user", "reply_reference": "回一句问候"}
+    assert _PRIVATE_ANALYSIS_ONLY not in str(invoked_calls[0].args)
+    passed_thought = engine._handle_tool_calls.await_args.args[1]
+    assert passed_thought == "调用 reply 回一句问候。"
+    assert _PRIVATE_ANALYSIS_ONLY not in passed_thought
+
+
+@pytest.mark.asyncio
+async def test_private_second_analysis_ends_without_sending_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(global_config.experimental, "planner_unsent_reply_retry", False)
+    monkeypatch.setattr(focus_mode_manager, "is_enabled_for_session", lambda session_id, is_group_chat=None: False)
+    engine, runtime = _build_decision_engine([_synthetic_user_message("在吗")], is_group=False)
+
+    await _decide(engine, _mock_completion(_PRIVATE_ANALYSIS_ONLY), planner_no_tool_count=0)
+    count, should_end, state = await _decide(
+        engine,
+        _mock_completion(_PRIVATE_ANALYSIS_ONLY),
+        planner_no_tool_count=1,
+    )
+
+    assert count == 2
+    assert should_end is True
+    assert state.cycle_end.reason == "planner_no_tool_end"
+    assert _hint_count(runtime._chat_history) == 0
+    engine._handle_tool_calls.assert_not_awaited()
+    runtime._enter_stop_state.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_query_and_wait_tools_are_not_rewritten_into_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(global_config.experimental, "planner_unsent_reply_retry", False)
+    monkeypatch.setattr(focus_mode_manager, "is_enabled_for_session", lambda session_id, is_group_chat=None: False)
+    engine, runtime = _build_decision_engine([_synthetic_user_message("帮我回忆一下")], is_group=False)
+    query_calls = [
+        ToolCall(call_id="call-profile", func_name="query_person_profile", args={"name": "对方"}),
+        ToolCall(call_id="call-memory", func_name="query_memory", args={"query": "近况"}),
+    ]
+
+    count, should_end, state = await _decide(engine, _mock_completion("先查资料。", query_calls), planner_no_tool_count=0)
+
+    assert should_end is False
+    assert count == 0
+    assert state.cycle_end.reason == "tool_continue"
+    assert [tool_call.func_name for tool_call in engine._handle_tool_calls.await_args.args[0]] == [
+        "query_person_profile",
+        "query_memory",
+    ]
+    assert _hint_count(runtime._chat_history) == 0
+
+    engine._handle_tool_calls = AsyncMock(return_value=(True, "wait", [], []))  # type: ignore[method-assign]
+    wait_call = ToolCall(call_id="call-wait", func_name="wait", args={"seconds": 20})
+    count, should_end, state = await _decide(engine, _mock_completion("先等等。", [wait_call]), planner_no_tool_count=0)
+
+    assert should_end is True
+    assert count == 0
+    assert state.cycle_end.reason == "tool_pause:wait"
+    assert [tool_call.func_name for tool_call in engine._handle_tool_calls.await_args.args[0]] == ["wait"]
+    assert _hint_count(runtime._chat_history) == 0
+
+
+@pytest.mark.asyncio
+async def test_group_analysis_without_reply_still_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(global_config.experimental, "planner_unsent_reply_retry", False)
+    monkeypatch.setattr(focus_mode_manager, "is_enabled_for_session", lambda session_id, is_group_chat=None: False)
+    engine, runtime = _build_decision_engine([_synthetic_user_message("群里随便聊聊")], is_group=True)
+
+    count, should_end, state = await _decide(engine, _mock_completion(_PRIVATE_ANALYSIS_ONLY), planner_no_tool_count=0)
+
+    assert count == 1
+    assert should_end is True
+    assert state.cycle_end.reason == "planner_no_tool_end"
+    assert _hint_count(runtime._chat_history) == 0
+    engine._handle_tool_calls.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_group_explicit_reply_intent_still_follows_experimental_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(focus_mode_manager, "is_enabled_for_session", lambda session_id, is_group_chat=None: False)
+    explicit_reply = "决定：调用reply，把这句问候发出去。"
+    engine, runtime = _build_decision_engine([_synthetic_user_message("@机器人 你好")], is_group=True)
+
+    monkeypatch.setattr(global_config.experimental, "planner_unsent_reply_retry", False)
+    _, should_end, _ = await _decide(engine, _mock_completion(explicit_reply), planner_no_tool_count=0)
+    assert should_end is True
+    assert _hint_count(runtime._chat_history) == 0
+
+    monkeypatch.setattr(global_config.experimental, "planner_unsent_reply_retry", True)
+    engine, runtime = _build_decision_engine([_synthetic_user_message("@机器人 你好")], is_group=True)
+    _, should_end, state = await _decide(engine, _mock_completion(explicit_reply), planner_no_tool_count=0)
+    assert should_end is False
+    assert state.cycle_end.reason == "planner_no_tool_retry"
+    assert runtime._chat_history[-1].content == PLANNER_UNSENT_REPLY_HINT

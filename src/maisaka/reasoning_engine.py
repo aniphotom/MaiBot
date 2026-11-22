@@ -52,7 +52,7 @@ from src.maisaka.builtin_tool import (
     is_builtin_tool_in_action_stage,
 )
 from .chat_loop_service import ChatResponse
-from .planner_reply_guard import has_unsent_reply_intent
+from .planner_reply_guard import has_unsent_reply_intent, should_retry_private_reply_omission
 from .tool_result_condenser import condense_tool_result, should_condense_tool_result
 from src.maisaka.visual.chat_history_refresher import (
     has_pending_image_recognition,
@@ -409,12 +409,14 @@ class MaisakaReasoningEngine:
     ) -> tuple[int, CycleEnd, bool]:
         """处理 Planner 未调用工具时的终止策略。"""
 
-        # 正文写了要回复却没调用工具时回复会丢失：提醒一次再跑一轮；同一回合只重试一次，仍不调用工具就正常结束
-        if (
-            global_config.experimental.planner_unsent_reply_retry
-            and planner_no_tool_count == 0
-            and has_unsent_reply_intent(planner_content)
-        ):
+        # 同一段连续无工具输出只提醒一次。群聊仍要正文写明想回复且打开实验开关；
+        # 私聊则在对方消息还没有 reply、表情或 wait，正文也没明确不发言时提醒。
+        # 提醒后的下一轮如果仍然不调用工具，就按原样结束，不把分析正文发给用户。
+        explicit_unsent_reply = (
+            global_config.experimental.planner_unsent_reply_retry and has_unsent_reply_intent(planner_content)
+        )
+        private_reply_omission = self._should_retry_unsent_private_reply(planner_content)
+        if planner_no_tool_count == 0 and (explicit_unsent_reply or private_reply_omission):
             self._runtime._chat_history.append(
                 ReferenceMessage(
                     content=PLANNER_UNSENT_REPLY_HINT,
@@ -425,13 +427,15 @@ class MaisakaReasoningEngine:
                     display_prefix="[未调用工具提醒]",
                 )
             )
-            planner_extra_lines.append("状态：正文表达了回复意图但未调用工具，已提醒并重试一轮")
-            logger.info(f"{self._runtime.log_prefix} Planner 表达了回复意图但未调用工具，已追加提醒并重试")
-            return (
-                planner_no_tool_count + 1,
-                CycleEnd("planner_no_tool_retry", "Planner 想回复但未调用工具，已提醒并继续下一轮。"),
-                False,
-            )
+            if private_reply_omission and not explicit_unsent_reply:
+                planner_extra_lines.append("状态：私聊对方消息尚未回复且未调用工具，已提醒并重试一轮")
+                logger.info(f"{self._runtime.log_prefix} 私聊有未回复消息但未调用 reply，已追加提醒并重试")
+                cycle_end = CycleEnd("planner_no_tool_retry", "私聊对方消息尚未回复，已提醒并继续下一轮。")
+            else:
+                planner_extra_lines.append("状态：正文表达了回复意图但未调用工具，已提醒并重试一轮")
+                logger.info(f"{self._runtime.log_prefix} Planner 表达了回复意图但未调用工具，已追加提醒并重试")
+                cycle_end = CycleEnd("planner_no_tool_retry", "Planner 想回复但未调用工具，已提醒并继续下一轮。")
+            return planner_no_tool_count + 1, cycle_end, False
 
         planner_no_tool_count += 1
         cycle_end = CycleEnd("planner_no_tool_end", "Planner本轮思考结束。")
@@ -441,6 +445,20 @@ class MaisakaReasoningEngine:
         )
         logger.info(f"{self._runtime.log_prefix} Planner 已结束本轮思考")
         return planner_no_tool_count, cycle_end, True
+
+    def _should_retry_unsent_private_reply(self, planner_content: str) -> bool:
+        """当前私聊是否因为漏掉可见回复而需要再决策一轮。"""
+
+        is_group_chat = bool(self._runtime.chat_stream.is_group_session)
+        return should_retry_private_reply_omission(
+            planner_content,
+            self._runtime._chat_history,
+            is_group_chat=is_group_chat,
+            focus_active=focus_mode_manager.is_enabled_for_session(
+                str(self._runtime.session_id or ""),
+                is_group_chat=is_group_chat,
+            ),
+        )
 
     def _end_planner_no_tool_cycle(
         self,
