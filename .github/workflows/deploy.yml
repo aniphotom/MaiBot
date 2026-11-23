@@ -1,12 +1,15 @@
 name: Manual Deploy
 
+# 只部署已经构建好的 ghcr.io/aniphotom/maibot，与 Build and Push (Self) 同一镜像名。
+# 不在这里构建。tag 填 sha-<40位提交>、sha256:<64位>，或日志里的完整镜像引用。
+
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "镜像 tag（latest 或 sha-xxxxxxx）"
-        required: false
-        default: latest
+        description: "已构建的固定标记：sha-<40位提交> 或 sha256:<64位digest>"
+        required: true
+        type: string
 
 concurrency:
   group: deploy-maibot
@@ -19,9 +22,28 @@ jobs:
       DEPLOY_HOST: ${{ secrets.SERVER_HOST }}
       DEPLOY_USER: ${{ secrets.SERVER_USER }}
       DEPLOY_DIR: project/maibot
-      IMAGE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 解析镜像引用
+        env:
+          IMAGE_REF: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          image=ghcr.io/aniphotom/maibot
+          ref=$IMAGE_REF
+          ref=${ref#"${image}:"}
+          ref=${ref#"${image}@"}
+          if [[ "$ref" =~ ^sha-[0-9a-f]{40}$ ]]; then
+            value="${image}:${ref}"
+          elif [[ "$ref" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            value="${image}@${ref}"
+          else
+            echo "只接受 ${image} 的 sha-<40位提交> 或 sha256:<64位digest>" >&2
+            exit 1
+          fi
+          echo "部署 ${value}"
+          echo "MAIBOT_IMAGE=${value}" >> "$GITHUB_ENV"
 
       - name: 配置 SSH
         env:
@@ -37,26 +59,27 @@ jobs:
           ssh "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
           scp docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.yml"
 
-      - name: 固化镜像 tag
+      - name: 固化镜像引用
         run: |
-          # 只更新 .env 里的 MAIBOT_IMAGE_TAG 一行，保留文件中的其他变量
+          # 只更新 .env 里的镜像引用，保留文件中的其他变量
           ssh "$DEPLOY_USER@$DEPLOY_HOST" "
             cd $DEPLOY_DIR &&
             touch .env &&
-            { grep -v '^MAIBOT_IMAGE_TAG=' .env || true; } > .env.tmp &&
-            printf 'MAIBOT_IMAGE_TAG=%s\n' '$IMAGE_TAG' >> .env.tmp &&
+            { grep -v -e '^MAIBOT_IMAGE=' -e '^MAIBOT_IMAGE_TAG=' .env || true; } > .env.tmp &&
+            printf 'MAIBOT_IMAGE=%s\n' '$MAIBOT_IMAGE' >> .env.tmp &&
             mv .env.tmp .env
           "
 
       - name: 拉取指定镜像
         run: |
+          # 命令行上的 MAIBOT_IMAGE 优先于 .env 和远端已有环境变量
           ssh "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd $DEPLOY_DIR && docker compose pull core"
+            "cd $DEPLOY_DIR && MAIBOT_IMAGE='$MAIBOT_IMAGE' docker compose pull core"
 
       - name: 启动
         run: |
           ssh "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd $DEPLOY_DIR && docker compose up -d --remove-orphans"
+            "cd $DEPLOY_DIR && MAIBOT_IMAGE='$MAIBOT_IMAGE' docker compose up -d --remove-orphans"
 
       - name: 健康检查
         run: |

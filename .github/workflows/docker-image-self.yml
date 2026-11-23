@@ -1,11 +1,15 @@
 name: Build and Push (Self)
 
-# 只构建 amd64，自用；官方 docker-image-main.yml 保留作参考，不参与运行。
+# 仅手动构建 linux/amd64，推到本仓库 GHCR。成功后不部署。
+# 镜像名与 Manual Deploy、docker-compose.yml 相同：ghcr.io/aniphotom/maibot
+# 标记只有 sha-<完整提交>。日志中的 digest 可直接填到 Manual Deploy 的 tag。
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
 
 concurrency:
   group: build-maibot
@@ -16,33 +20,40 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 生成两个 tag：latest（main 分支）+ sha-xxxxxxx（可回滚）
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/maibot
+          images: ghcr.io/aniphotom/maibot
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short
+            type=raw,value=sha-${{ github.sha }}
 
-      - uses: docker/build-push-action@v6
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: 打印提交与镜像标记
+        run: |
+          echo "commit=${{ github.sha }}"
+          echo "tag=${{ steps.meta.outputs.tags }}"
+          echo "digest=${{ steps.build.outputs.digest }}"
+          echo "by_digest=ghcr.io/aniphotom/maibot@${{ steps.build.outputs.digest }}"
