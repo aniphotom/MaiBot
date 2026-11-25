@@ -2,6 +2,7 @@ name: Manual Deploy
 
 # 只部署 ghcr.io/aniphotom/maibot。tag 留空时用该镜像的 latest，拉取后固定 digest。
 # latest 只来自 Build and Push (Self) 的成功构建，不会改去官方仓库。
+# 不上传、不覆盖服务器上的 compose，避免用本分支的旧编排盖住已升级的核心。
 # 切换或健康检查失败时恢复部署前的 core。不在这里构建。
 
 on:
@@ -62,15 +63,13 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: 上传 compose 和部署脚本
+      - name: 上传部署脚本
         run: |
           ssh "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_DIR/.deploy-rollback'"
-          scp docker-compose.yml \
-            "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/.deploy-rollback/docker-compose.next.${GITHUB_RUN_ID}.yml"
           scp .github/scripts/manual-deploy-core.sh \
             "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/.deploy-rollback/manual-deploy-core.${GITHUB_RUN_ID}.sh"
 
       - name: 拉取、切换，失败则恢复原 core
         run: |
           ssh "$DEPLOY_USER@$DEPLOY_HOST" \
-            "DEPLOY_DIR='$DEPLOY_DIR' WANT_IMAGE='$MAIBOT_IMAGE' RUN_ID='$GITHUB_RUN_ID' bash '$DEPLOY_DIR/.deploy-rollback/manual-deploy-core.${GITHUB_RUN_ID}.sh'"
+            "DEPLOY_DIR='$DEPLOY_DIR' WANT_IMAGE='$MAIBOT_IMAGE' bash '$DEPLOY_DIR/.deploy-rollback/manual-deploy-core.${GITHUB_RUN_ID}.sh'"

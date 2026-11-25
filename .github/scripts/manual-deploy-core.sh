@@ -5,7 +5,6 @@ set -euo pipefail
 
 : "${DEPLOY_DIR:?}"
 : "${WANT_IMAGE:?}"
-: "${RUN_ID:?}"
 
 cd "$DEPLOY_DIR"
 mkdir -p .deploy-rollback
@@ -21,9 +20,8 @@ if [[ ! "$WANT_IMAGE" =~ ^ghcr\.io/aniphotom/maibot:(latest|sha-[0-9a-f]{40})$ ]
   exit 1
 fi
 
-next=".deploy-rollback/docker-compose.next.${RUN_ID}.yml"
-if [ ! -f "$next" ]; then
-  echo "没有找到本次上传的 compose：${next}" >&2
+if [ ! -f docker-compose.yml ]; then
+  echo "服务器上没有 docker-compose.yml。不会上传本仓库的编排。" >&2
   exit 1
 fi
 
@@ -50,6 +48,8 @@ else
 fi
 if [ -f docker-compose.yml ]; then
   cp -a docker-compose.yml .deploy-rollback/docker-compose.yml
+else
+  rm -f .deploy-rollback/docker-compose.yml
 fi
 rm -f .deploy-rollback/env .deploy-rollback/env.present .deploy-rollback/env.absent
 if [ -f .env ]; then
@@ -58,6 +58,18 @@ if [ -f .env ]; then
 else
   : > .deploy-rollback/env.absent
 fi
+
+core_image() {
+  awk '
+    $0 ~ /^  core:/ { in_core=1; next }
+    in_core && $0 ~ /^  [^[:space:]]/ { in_core=0 }
+    in_core && $0 ~ /^[[:space:]]*image:/ {
+      gsub(/["'\'']/, "", $2)
+      print $2
+      exit
+    }
+  '
+}
 
 restore_files() {
   if [ -f .deploy-rollback/docker-compose.yml ]; then
@@ -102,7 +114,7 @@ rollback() {
     esac
   fi
   config_text="$(env -u MAIBOT_IMAGE docker compose config)"
-  resolved="$(awk '/^[[:space:]]*image:/ {gsub(/["'\'']/, "", $2); print $2; exit}' <<< "$config_text")"
+  resolved="$(core_image <<< "$config_text")"
   resolved="${resolved%\"}"
   resolved="${resolved#\"}"
   case "$resolved" in
@@ -157,11 +169,30 @@ echo "固定 ${pinned}"
 target_id="$(docker image inspect --format '{{.Id}}' "$pinned")"
 
 changed=1
-cp -a "$next" docker-compose.yml
 touch .env
 { grep -v -e '^MAIBOT_IMAGE=' -e '^MAIBOT_IMAGE_TAG=' .env || true; } > .env.tmp
 printf 'MAIBOT_IMAGE=%s\n' "$pinned" >> .env.tmp
 mv .env.tmp .env
+current="$(core_image <<< "$(MAIBOT_IMAGE="$pinned" docker compose config)")"
+if [ "$current" != "$pinned" ]; then
+  tmp="$(mktemp)"
+  if ! awk -v img="$pinned" '
+    $0 ~ /^  core:/ { in_core=1 }
+    in_core && $0 ~ /^  [^[:space:]]/ && $0 !~ /^  core:/ { in_core=0 }
+    in_core && !done && $0 ~ /^[[:space:]]*image:/ {
+      print "    image: " img
+      done=1
+      next
+    }
+    { print }
+    END { if (!done) exit 2 }
+  ' docker-compose.yml > "$tmp"; then
+    rm -f "$tmp"
+    echo "现有 compose 的 core 没有可替换的 image 行。未上传仓库编排。" >&2
+    exit 1
+  fi
+  mv "$tmp" docker-compose.yml
+fi
 MAIBOT_IMAGE="$pinned" docker compose up -d --no-deps --force-recreate core
 
 running_id="$(docker inspect --format '{{.Image}}' maim-bot-core)"

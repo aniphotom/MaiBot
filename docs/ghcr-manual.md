@@ -2,6 +2,8 @@
 
 镜像只有 `ghcr.io/aniphotom/maibot`。留空部署也不会去官方仓库。
 
+构建内容是 Run workflow 时选定的那个 git 提交，不是部署当时仓库里的另一份工作区。本分支没有另一路正在升级的核心和 QQ 适配器；在这里构建再留空部署，得到的是这次提交的镜像。要上新核心，先在新提交上构建，或部署时填写那个 `sha-` / digest。部署不上传 compose，只改服务器上已有 core 的镜像引用。
+
 ## 平时怎么做
 
 1. Actions → **Build and Push (Self)** → Run。只构建 `linux/amd64` 并推送，不部署。
