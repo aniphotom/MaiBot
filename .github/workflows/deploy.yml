@@ -1,12 +1,18 @@
 name: Manual Deploy
 
+# 只部署 ghcr.io/aniphotom/maibot。tag 留空时用该镜像的 latest，拉取后固定 digest。
+# latest 只来自 Build and Push (Self) 的成功构建，不会改去官方仓库。
+# 不上传、不覆盖服务器上的 compose，避免用本分支的旧编排盖住已升级的核心。
+# 切换或健康检查失败时恢复部署前的 core。不在这里构建。
+
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "镜像 tag（latest 或 sha-xxxxxxx）"
+        description: "留空=自有镜像 latest。也可填 sha-<40位提交> 或 sha256:<64位digest>"
         required: false
-        default: latest
+        default: ""
+        type: string
 
 concurrency:
   group: deploy-maibot
@@ -19,9 +25,34 @@ jobs:
       DEPLOY_HOST: ${{ secrets.SERVER_HOST }}
       DEPLOY_USER: ${{ secrets.SERVER_USER }}
       DEPLOY_DIR: project/maibot
-      IMAGE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 解析镜像引用
+        env:
+          IMAGE_REF: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          image=ghcr.io/aniphotom/maibot
+          ref="${IMAGE_REF:-}"
+          ref="${ref//[[:space:]]/}"
+          if [ -z "$ref" ] || [ "$ref" = "latest" ] || [ "$ref" = "${image}:latest" ]; then
+            value="${image}:latest"
+          else
+            stripped=$ref
+            stripped=${stripped#"${image}:"}
+            stripped=${stripped#"${image}@"}
+            if [[ "$stripped" =~ ^sha-[0-9a-f]{40}$ ]]; then
+              value="${image}:${stripped}"
+            elif [[ "$stripped" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              value="${image}@${stripped}"
+            else
+              echo "只接受留空、${image} 的 latest、sha-<40位提交> 或 sha256:<64位digest>" >&2
+              exit 1
+            fi
+          fi
+          echo "部署目标 ${value}；拉取成功后会改写为 digest"
+          echo "MAIBOT_IMAGE=${value}" >> "$GITHUB_ENV"
 
       - name: 配置 SSH
         env:
@@ -32,41 +63,13 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: 同步 docker-compose.yml
+      - name: 上传部署脚本
         run: |
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
-          scp docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.yml"
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_DIR/.deploy-rollback'"
+          scp .github/scripts/manual-deploy-core.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/.deploy-rollback/manual-deploy-core.${GITHUB_RUN_ID}.sh"
 
-      - name: 固化镜像 tag
-        run: |
-          # 只更新 .env 里的 MAIBOT_IMAGE_TAG 一行，保留文件中的其他变量
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" "
-            cd $DEPLOY_DIR &&
-            touch .env &&
-            { grep -v '^MAIBOT_IMAGE_TAG=' .env || true; } > .env.tmp &&
-            printf 'MAIBOT_IMAGE_TAG=%s\n' '$IMAGE_TAG' >> .env.tmp &&
-            mv .env.tmp .env
-          "
-
-      - name: 拉取指定镜像
+      - name: 拉取、切换，失败则恢复原 core
         run: |
           ssh "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd $DEPLOY_DIR && docker compose pull core"
-
-      - name: 启动
-        run: |
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd $DEPLOY_DIR && docker compose up -d --remove-orphans"
-
-      - name: 健康检查
-        run: |
-          for i in $(seq 1 90); do
-            if ssh "$DEPLOY_USER@$DEPLOY_HOST" "curl -fsS -o /dev/null http://127.0.0.1:18001"; then
-              echo "✅ MaiBot WebUI 已就绪（${i}s）"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "❌ 未就绪，最近 50 行日志："
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR && docker compose logs --tail 50 core"
-          exit 1
+            "DEPLOY_DIR='$DEPLOY_DIR' WANT_IMAGE='$MAIBOT_IMAGE' bash '$DEPLOY_DIR/.deploy-rollback/manual-deploy-core.${GITHUB_RUN_ID}.sh'"
