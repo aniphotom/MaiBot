@@ -1,30 +1,30 @@
-# 自有镜像：手动构建，再手动部署
+# 自有镜像
 
-镜像名只有一个：`ghcr.io/aniphotom/maibot`。构建和部署都用它。
+镜像只有 `ghcr.io/aniphotom/maibot`。留空部署也不会去官方仓库。
 
-当前 `main` 的应用源码与现网官方 1.3.9（`ac6ed61`）相同。自有镜像重新构建后，digest 不会等于官方 `sengokucola/maibot@sha256:90760b3060af26549f7cd075521522d3f26f7504d444a6e53629ef8341977d05`。
+## 平时怎么做
 
-## 构建
+1. Actions → **Build and Push (Self)** → Run。只构建 `linux/amd64` 并推送，不部署。
+2. 成功后，Actions → **Manual Deploy**，`tag` 留空。这会拉取上面的 `:latest`，再固定成 digest 后只重建 core。2026-11-25 已成功的构建还没有 `latest` 标签；留空要等包含这次改动的构建成功，在那之前请填写那次的 `sha-` 或 digest。
 
-Actions → **Build and Push (Self)** → Run workflow。只在手动触发时构建 `linux/amd64` 并推送，不会部署。
+要指定版本时，`tag` 填 `sha-<40位提交>` 或 `sha256:<64位>`，也可以粘贴日志里的完整 `ghcr.io/aniphotom/maibot:...`。
 
-- 日志 `tag=` 是交给推送步骤的 `ghcr.io/aniphotom/maibot:sha-<本次 github.sha>`
-- 日志 `by_digest=` 是同一镜像的 `ghcr.io/aniphotom/maibot@sha256:...`
-- `github.sha` 是本次手动运行所选自的提交，不是现网 `ac6ed61`，除非当时选自的就是它
-- 登录用 `GITHUB_TOKEN`，不新增 PAT。仓库 Actions 若把令牌限制为只读，这里的 `packages: write` 不会生效
+构建日志里的 `tag=` 是 `sha-<本次提交>`，`by_digest=` 是 digest。只有这次构建结束时没有更新的成功或仍在进行的构建，才会把同一 digest 标成 `latest`。
 
-## 部署
+## 失败会自动回到切换前
 
-构建完成并确认日志后，Actions → **Manual Deploy**。`tag` 填下面之一：
+部署先记下正在运行的 core 镜像 ID，以及当时的 `docker-compose.yml` 和 `.env`。拉取成功后才重建 core。下面任一情况会恢复原来的 core，并让这趟 Actions 失败：
 
-- `sha-<40位提交>`
-- `sha256:<64位>`
-- 或日志中的完整 `ghcr.io/aniphotom/maibot:sha-...` / `ghcr.io/aniphotom/maibot@sha256:...`
+- 启动失败
+- 运行中的 core 镜像不是刚固定的那个
+- 90 秒内本机 `18001` 没有 HTTP 响应
 
-非法值、`latest`、官方仓库名在 SSH 之前失败。`pull` 和 `up` 使用本次校验过的 `MAIBOT_IMAGE`，空值会让 compose 停住，core 没有隐式 `latest`。流程仍用原有 SSH、目录 `project/maibot`、同步 `docker-compose.yml` 和健康检查。健康检查只看 `18001` 是否响应，不核对镜像 digest。`.env` 只改 `MAIBOT_IMAGE`。卷挂载不改：`docker-config/mmc`、`data/MaiMBot`、插件数据、表情、`plugins`、日志、`depends-data`。
+恢复时不 `down`、不删数据卷、不 prune，也不重启其他服务。原来若是官方镜像、没有自有 tag，按记下的镜像 ID 或 digest 回到那一个。本机镜像已被删掉且没有 digest 时，回滚会失败并保持 Actions 失败。
 
-宿主机 `./data/MaiMBot/plugins` 独立挂载。构建核心不会更新插件，身份和群 @ 的既有补丁留在该目录。
+自动回退只覆盖上面这些失败。`18001` 有响应也不代表 QQ 回复正常；健康检查只访问本机 WebUI，不发 QQ 消息。检查通过之后的崩溃、回复错误，不会再自动退。
 
-此部署流程没有备份步骤。回滚：用上一个 `sha-` tag 或 `sha256:` digest 再跑一次 Manual Deploy。回到现网官方镜像时，把 compose 的 `image` 改回上面的官方 digest，不要用本流程的 `tag` 输入去指官方仓库。
+回滚不恢复数据库、配置和插件文件。容器启动时会做插件目录布局迁移，程序也可能升级本地数据库。这些写入不会随镜像一起退回，所以不能保证任意旧版本对着已升级的数据仍能工作。
 
-推送本分支或打开 PR 不会构建、不会部署。对这两个工作流点 Run 才会连 GHCR 或生产。镜像在有人手动运行 Build and Push (Self) 且成功之前不能拉取。合并到 `main` 仍会触发原有 `docker-image-main.yml`（Docker Hub，含 arm64）；本说明不改那个文件。
+宿主机 `./data/MaiMBot/plugins` 独立挂载。构建核心不会更新插件，身份和群 @ 补丁留在该目录。
+
+推送分支或打开 PR 不会构建，也不会部署。合并到 `main` 仍会触发未改的 `docker-image-main.yml`。

@@ -2,8 +2,8 @@ services:
   core:
     container_name: maim-bot-core
     stop_grace_period: 70s # Runner 最多等待 Worker 60 秒，再保留强制退出时间
-    #### 自建镜像：ghcr.io/aniphotom/maibot，由 Manual Deploy 写入 MAIBOT_IMAGE ####
-    image: ${MAIBOT_IMAGE:?set MAIBOT_IMAGE to ghcr.io/aniphotom/maibot:sha-<40> or @sha256:<64>}
+    #### 自建镜像：只接受部署写入的 ghcr.io/aniphotom/maibot digest，没有默认官方镜像 ####
+    image: ${MAIBOT_IMAGE:?set MAIBOT_IMAGE to ghcr.io/aniphotom/maibot@sha256:<64>}
     # image: sengokucola/maibot:latest
     # image: infinitycat/maibot:latest
     #### dev ####
